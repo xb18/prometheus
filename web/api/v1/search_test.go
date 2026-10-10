@@ -1551,3 +1551,32 @@ func TestSearchResultStreamerBatchCapacity(t *testing.T) {
 		})
 	}
 }
+
+func TestSearchStreamDeadlineErrors(t *testing.T) {
+	t.Run("before streaming", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		streamSearchResults(t.Context(), minimalSearchAPI(), rec, storage.ErrSearchResultSet(context.DeadlineExceeded), searchParams{batchSize: 5, limit: 5}, func(result storage.SearchResult) string {
+			return result.Value
+		})
+
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		var response Response
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+		require.Equal(t, errorTimeout.str, response.ErrorType)
+	})
+
+	t.Run("after partial results", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		rs := storage.NewSearchResultSetFromSliceAndError([]storage.SearchResult{{Value: "alpha", Score: 1}}, nil, context.DeadlineExceeded)
+		streamSearchResults(t.Context(), minimalSearchAPI(), rec, rs, searchParams{batchSize: 5, limit: 5}, func(result storage.SearchResult) string {
+			return result.Value
+		})
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		lines := parseNDJSON(t, rec.Body.String())
+		require.Len(t, lines, 2)
+		var terminal searchErrorResponse
+		require.NoError(t, json.Unmarshal(lines[1], &terminal))
+		require.Equal(t, errorTimeout.str, terminal.ErrorType)
+	})
+}

@@ -103,7 +103,11 @@ func (q *blockBaseQuerier) SearchLabelNames(ctx context.Context, hints *storage.
 		return storage.ErrSearchResultSet(err)
 	}
 
-	return storage.NewSearchResultSetFromSlice(storage.ApplySearchHints(names, hints), nil)
+	results, err := storage.ApplySearchHintsWithContext(ctx, names, hints)
+	if err != nil {
+		return storage.ErrSearchResultSet(err)
+	}
+	return storage.NewSearchResultSetFromSlice(results, nil)
 }
 
 // SearchLabelValues implements storage.Searcher.
@@ -137,7 +141,11 @@ func (q *blockBaseQuerier) SearchLabelValues(ctx context.Context, name string, h
 		return storage.ErrSearchResultSet(err)
 	}
 
-	return storage.NewSearchResultSetFromSlice(storage.ApplySearchHints(values, hints), nil)
+	results, err := storage.ApplySearchHintsWithContext(ctx, values, hints)
+	if err != nil {
+		return storage.ErrSearchResultSet(err)
+	}
+	return storage.NewSearchResultSetFromSlice(results, nil)
 }
 
 func (q *blockBaseQuerier) Close() error {
