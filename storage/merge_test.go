@@ -2005,23 +2005,90 @@ func TestMergeQuerierSearch(t *testing.T) {
 		require.NoError(t, rs.Close())
 	})
 
-	t.Run("non-searcher querier is skipped", func(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		primaries   []Querier
+		secondaries []Querier
+		expected    bool
+	}{
+		{
+			name: "supported nested primary",
+			primaries: []Querier{
+				newMerged(&searchQuerier{}, &searchQuerier{}),
+				&searchQuerier{},
+			},
+			expected: true,
+		},
+		{
+			name: "unsupported nested primary",
+			primaries: []Querier{
+				newMerged(&searchQuerier{}, &mockQuerier{}),
+				&searchQuerier{},
+			},
+		},
+		{
+			name:        "supported secondary only",
+			secondaries: []Querier{&searchQuerier{}},
+			expected:    true,
+		},
+		{
+			name:        "unsupported secondary only",
+			secondaries: []Querier{&mockQuerier{}},
+		},
+		{
+			name:        "supported nested secondary",
+			secondaries: []Querier{newMerged(&searchQuerier{}, &searchQuerier{})},
+			expected:    true,
+		},
+		{
+			name:        "unsupported nested secondary",
+			secondaries: []Querier{newMerged(&searchQuerier{}, &mockQuerier{})},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			merged := NewMergeQuerier(tc.primaries, tc.secondaries, ChainedSeriesMerge)
+			defer merged.Close()
+			searcher, ok := merged.(Searcher)
+			require.Equal(t, tc.expected, ok)
+			if ok {
+				require.Empty(t, collectSearchResults(t, searcher.SearchLabelNames(ctx, nil)))
+			}
+		})
+	}
+
+	t.Run("secondary deadline remains a warning", func(t *testing.T) {
+		primary := &searchQuerier{names: []SearchResult{{Value: "env", Score: 1}}}
+		secondary := &searchQuerier{err: context.DeadlineExceeded}
+		merged := NewMergeQuerier([]Querier{primary}, []Querier{secondary}, ChainedSeriesMerge)
+		defer merged.Close()
+
+		rs := merged.(Searcher).SearchLabelNames(ctx, nil)
+		defer func() { require.NoError(t, rs.Close()) }()
+		require.True(t, rs.Next())
+		require.Equal(t, "env", rs.At().Value)
+		require.False(t, rs.Next())
+		require.NoError(t, rs.Err())
+		warnings := rs.Warnings().AsErrors()
+		require.Len(t, warnings, 1)
+		require.ErrorIs(t, warnings[0], context.DeadlineExceeded)
+	})
+
+	t.Run("mixed search support is not advertised", func(t *testing.T) {
 		q1 := &searchQuerier{
 			names: []SearchResult{{Value: "env", Score: 1.0}},
 		}
-		q2 := &mockQuerier{resp: []string{"should_be_ignored"}}
+		q2 := &mockQuerier{resp: []string{"must_not_be_ignored"}}
 		// Verify precondition: mockQuerier does not implement Searcher.
 		_, isSearcher := Querier(q2).(Searcher)
 		require.False(t, isSearcher)
 		merged := newMerged(q1, q2)
 		defer merged.Close()
 
-		got := collectSearchResults(t, merged.(Searcher).SearchLabelNames(ctx, nil))
-		require.Len(t, got, 1)
-		require.Equal(t, "env", got[0].Value)
+		_, isSearcher = merged.(Searcher)
+		require.False(t, isSearcher)
 	})
 
-	t.Run("no searcher queriers returns empty", func(t *testing.T) {
+	t.Run("no searcher queriers is not advertised", func(t *testing.T) {
 		// Two non-searcher queriers force the querierAdapter path.
 		q1 := &mockQuerier{resp: []string{"a", "b"}}
 		q2 := &mockQuerier{resp: []string{"c", "d"}}
@@ -2031,8 +2098,27 @@ func TestMergeQuerierSearch(t *testing.T) {
 		merged := newMerged(q1, q2)
 		defer merged.Close()
 
-		got := collectSearchResults(t, merged.(Searcher).SearchLabelNames(ctx, nil))
-		require.Empty(t, got)
+		_, isSearcher = merged.(Searcher)
+		require.False(t, isSearcher)
+	})
+
+	t.Run("unsupported secondary prevents search capability", func(t *testing.T) {
+		primary := &searchQuerier{names: []SearchResult{{Value: "env", Score: 1.0}}}
+		secondary := &mockQuerier{resp: []string{"remote"}}
+		merged := NewMergeQuerier([]Querier{primary}, []Querier{secondary}, ChainedSeriesMerge)
+		defer merged.Close()
+
+		_, isSearcher := merged.(Searcher)
+		require.False(t, isSearcher)
+	})
+
+	t.Run("noop secondary does not prevent search capability", func(t *testing.T) {
+		primary := &searchQuerier{names: []SearchResult{{Value: "env", Score: 1.0}}}
+		merged := NewMergeQuerier([]Querier{primary}, []Querier{NoopQuerier()}, ChainedSeriesMerge)
+		defer merged.Close()
+
+		_, isSearcher := merged.(Searcher)
+		require.True(t, isSearcher)
 	})
 
 	t.Run("OrderByScoreDesc overrides natural ordering", func(t *testing.T) {

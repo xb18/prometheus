@@ -1580,3 +1580,57 @@ func TestSearchStreamDeadlineErrors(t *testing.T) {
 		require.Equal(t, errorTimeout.str, terminal.ErrorType)
 	})
 }
+
+func newUnsupportedSearchAPI(t *testing.T) *API {
+	t.Helper()
+
+	api := minimalSearchAPI()
+	api.Queryable = errorTestQueryable{q: storage.NewMergeQuerier(
+		[]storage.Querier{fixedSearchQuerier{rs: storage.EmptySearchResultSet()}},
+		[]storage.Querier{errorTestQuerier{}},
+		storage.ChainedSeriesMerge,
+	)}
+	return api
+}
+
+func TestSearchEndpointsRejectIncompleteStorageSearchSupport(t *testing.T) {
+	api := newUnsupportedSearchAPI(t)
+	r := route.New()
+	api.Register(r)
+	endpoints := []struct {
+		path   string
+		params url.Values
+	}{
+		{path: "/search/metric_names"},
+		{path: "/search/label_names"},
+		{path: "/search/label_values", params: url.Values{"label": {"job"}}},
+	}
+
+	for _, endpoint := range endpoints {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			t.Run(method+" "+endpoint.path, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				r.ServeHTTP(rec, searchEndpointRequest(t, method, endpoint.path, endpoint.params))
+				require.Equal(t, http.StatusInternalServerError, rec.Code)
+				require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+
+				var response Response
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				require.Equal(t, statusError, response.Status)
+				require.Equal(t, errorUnavailable.str, response.ErrorType)
+				require.Equal(t, "search is not supported by all storage backends participating in the query", response.Error)
+			})
+		}
+	}
+}
+
+// searchEndpointRequest builds a GET or form-encoded POST request.
+func searchEndpointRequest(t *testing.T, method, path string, params url.Values) *http.Request {
+	t.Helper()
+	if method == http.MethodPost {
+		req := httptest.NewRequest(method, "http://example.com"+path, strings.NewReader(params.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return req
+	}
+	return httptest.NewRequest(method, "http://example.com"+path+"?"+params.Encode(), http.NoBody)
+}
